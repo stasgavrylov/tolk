@@ -1,0 +1,18 @@
+.build/
+build/
+.DS_Store
+.swiftpm/
+
+# Local agent and development state
+.pi/
+.playwright-mcp/
+.impeccable/
+.lll.toml
+
+# Local credentials and signing identities
+.env
+.env.*
+!.env.example
+*.p12
+*.p8
+*.key

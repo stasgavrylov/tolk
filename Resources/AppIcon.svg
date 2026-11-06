@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">Tolk — Two voices</title>
+  <desc id="desc">Two overlapping, squared speech cards in forest green and sage, on an ivory rounded square.</desc>
+  <defs>
+    <linearGradient id="base" x2="0.5" y2="1"><stop stop-color="#f6f5eb"/><stop offset="1" stop-color="#e1e7d9"/></linearGradient>
+    <linearGradient id="front" x2="0" y2="1"><stop stop-color="#a7c2a5"/><stop offset="1" stop-color="#87a989"/></linearGradient>
+    <filter id="lift" x="-25%" y="-20%" width="155%" height="160%"><feDropShadow dx="0" dy="3" stdDeviation="2" flood-color="#294836" flood-opacity="0.15"/></filter>
+  </defs>
+  <path d="M84 24H172C213 24 232 43 232 84V172C232 213 213 232 172 232H84C43 232 24 213 24 172V84C24 43 43 24 84 24Z" fill="url(#base)"/>
+  <path d="M84 25H172C212 25 231 44 231 84V172C231 212 212 231 172 231H84C44 231 25 212 25 172V84C25 44 44 25 84 25Z" fill="none" stroke="#fff" stroke-opacity="0.65"/>
+  <path d="M71 66H144Q160 66 160 82V136Q160 152 144 152H104L72 176L76 152H71Q55 152 55 136V82Q55 66 71 66Z" fill="#305d48"/>
+  <path d="M121 111H187Q203 111 203 127V168Q203 184 187 184H183L187 204L161 184H121Q105 184 105 168V127Q105 111 121 111Z" fill="url(#front)" stroke="#e9eddf" stroke-width="3" stroke-linejoin="round" filter="url(#lift)"/>
+</svg>
