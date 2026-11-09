@@ -228,7 +228,7 @@ final class SuggestionPresenter: NSObject, NSPopoverDelegate {
 
     nonisolated func popoverDidClose(_ notification: Notification) {
         MainActor.assumeIsolated {
-            if case .loading = translator.suggestions { translator.dismissSuggestions() }
+            translator.dismissSuggestions()
         }
     }
 }

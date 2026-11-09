@@ -478,6 +478,78 @@ import TolkTestSupport
         #expect(NSWorkspace.shared.frontmostApplication?.processIdentifier == frontmost)
     }
 
+    private func makeAlternativesApp() async throws -> (AppState, ControlledProvider) {
+        let provider = ControlledProvider()
+        let app = try await makeApp(provider: provider)
+        app.translator.load(text: "Усе заспокоїлося.", source: .language("uk"), target: "en",
+                            translation: "Everything has calmed down.")
+        app.translator.requestSuggestions(pane: .translation, selection: "Everything has calmed down.")
+        try #require(await eventually { provider.requests.count == 1 })
+        provider.finish(0, text: #"{"suggestions":[{"text":"Things have settled down.","note":"Нейтрально.","back":"Усе вляглося."},{"text":"Everything is back to normal.","note":"Розмовний вислів про повернення до звичного стану.","back":"Усе повернулося до норми."}]}"#)
+        try #require(await eventually { if case .loaded = app.translator.suggestions { true } else { false } })
+        return (app, provider)
+    }
+
+    @Test(arguments: ["light", "dark"])
+    func refreshingOneAlternativeDoesNotPickItAndKeepsAnAccessibleRetry(appearance: String) async throws {
+        let frontmost = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        let (app, provider) = try await makeAlternativesApp()
+        var picked: PhraseSuggestion?
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 380, height: 350),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.title = "Alternatives"
+        window.contentViewController = NSHostingController(rootView: SuggestionsView(
+            translator: app.translator, onPick: { picked = $0 }, onClose: {}))
+        window.appearance = NSAppearance(named: appearance == "dark" ? .darkAqua : .aqua)
+        defer { app.translator.dismissSuggestions(); window.close() }
+        window.orderBack(nil)
+        try await Task.sleep(for: .milliseconds(150))
+        let refresh = try element("suggestion-refresh-1", in: window)
+        #expect(attribute("accessibilityLabel", of: refresh) as? String == "Another like this")
+        let frame = try #require(attribute("accessibilityFrame", of: refresh) as? NSValue).rectValue
+        #expect(frame.width >= 24 && frame.height >= 24, "Small glyphs must retain a usable target")
+        #expect(try press(refresh))
+        try #require(await eventually { provider.requests.count == 2 })
+        #expect(app.translator.suggestionRefreshStates[1] == .loading)
+        #expect(picked == nil)
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(attribute("isAccessibilityEnabled", of: try element("suggestion-refresh-1", in: window)) as? Bool == false)
+        try capture(window, named: "alternatives-\(appearance)-refreshing")
+        provider.finish(1, error: LLMError.http(status: 503, message: "Temporarily unavailable"))
+        try #require(await eventually { if case .failed = app.translator.suggestionRefreshStates[1] { true } else { false } })
+        try await Task.sleep(for: .milliseconds(100))
+        try capture(window, named: "alternatives-\(appearance)-retry")
+        #expect(try press(element("suggestion-refresh-1", in: window)))
+        try #require(await eventually { provider.requests.count == 3 })
+        provider.finish(2, text: #"{"suggestions":[{"text":"Things are normal again.","note":"Розмовний, нейтральний вислів.","back":"Усе знову нормально."}]}"#)
+        try #require(await eventually { app.translator.suggestionRefreshStates.isEmpty })
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(picked == nil)
+        #expect(app.translator.translation == "Everything has calmed down.")
+        #expect(try press(element("suggestion-1", in: window)))
+        #expect(picked?.text == "Things are normal again.")
+        app.translator.requestSuggestions(pane: .source, selection: "Усе заспокоїлося.")
+        try #require(await eventually { provider.requests.count == 4 })
+        provider.finish(3, text: #"{"suggestions":[{"text":"Things have settled down.","note":"Нейтрально.","back":"Усе вляглося."}]}"#)
+        try #require(await eventually { if case .loaded = app.translator.suggestions { true } else { false } })
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(!descendants(window).contains { (attribute("accessibilityIdentifier", of: $0) as? String)?.hasPrefix("suggestion-refresh-") == true })
+        #expect(!window.isKeyWindow)
+        #expect(NSWorkspace.shared.frontmostApplication?.processIdentifier == frontmost)
+    }
+
+    @Test func closingALoadedPopoverCancelsItsPendingRowRefresh() async throws {
+        let (app, provider) = try await makeAlternativesApp()
+        let presenter = SuggestionPresenter(translator: app.translator)
+        app.translator.refreshSuggestion(at: 1)
+        try #require(await eventually { provider.requests.count == 2 })
+        presenter.popoverDidClose(Notification(name: NSPopover.didCloseNotification))
+        #expect(app.translator.suggestions == .idle)
+        #expect(app.translator.suggestionRefreshStates.isEmpty)
+        provider.finish(1, text: #"{"suggestions":[]}"#)
+    }
+
     private func press(_ element: NSObject) throws -> Bool {
         let action = NSSelectorFromString("accessibilityPerformPress")
         try #require(element.responds(to: action))

@@ -10,6 +10,11 @@ public enum SuggestionState: Equatable {
     case failed(pane: Pane, selection: String, message: String)
 }
 
+public enum SuggestionRefreshState: Equatable, Sendable {
+    case loading
+    case failed(message: String)
+}
+
 public struct TranslationFailure: Equatable, Sendable {
     public enum Operation: Sendable { case translation, smoothing }
     public let operation: Operation
@@ -35,6 +40,7 @@ public final class TranslatorModel {
     public private(set) var translationIsPartial = false
     public private(set) var isStopped = false
     public private(set) var suggestions: SuggestionState = .idle
+    public private(set) var suggestionRefreshStates: [Int: SuggestionRefreshState] = [:]
     /// Incremented when the translation text is replaced wholesale (so views can reset selection).
     public private(set) var translationRevision = 0
 
@@ -48,6 +54,11 @@ public final class TranslatorModel {
     @ObservationIgnored private var translateTask: Task<Void, Never>?
     @ObservationIgnored private var historyTask: Task<Void, Never>?
     @ObservationIgnored private var suggestionTask: Task<Void, Never>?
+    @ObservationIgnored private var suggestionRefreshTasks: [Int: Task<Void, Never>] = [:]
+    @ObservationIgnored private var suggestionGeneration = 0
+    @ObservationIgnored private var originalSuggestions: [PhraseSuggestion] = []
+    // Comparison keys stay local; prompts receive the original, readable wording.
+    @ObservationIgnored private var shownSuggestions: [String: String] = [:]
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var lastRequestKey: String?
     @ObservationIgnored private var adjustingLanguages = false
@@ -92,7 +103,7 @@ public final class TranslatorModel {
     private func sourceEdited() {
         guard !adjustingLanguages else { return }
         cancelInFlight()
-        suggestions = .idle
+        dismissSuggestions()
         failure = nil
         if sourceText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             translation = ""
@@ -121,7 +132,7 @@ public final class TranslatorModel {
 
     private func languagesChanged() {
         guard !adjustingLanguages else { return }
-        suggestions = .idle
+        dismissSuggestions()
         if !sourceText.isEmpty { translateNow() }
     }
 
@@ -173,6 +184,7 @@ public final class TranslatorModel {
         cancelDebounce()
         let text = sourceText
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        dismissSuggestions()
 
         let plan = TranslationPlanner.plan(text: text, source: sourceLanguage, target: targetLanguage, settings: settings)
         detected = plan.detected
@@ -268,7 +280,7 @@ public final class TranslatorModel {
         if !oldTranslation.isEmpty { sourceText = oldTranslation }
         adjustingLanguages = false
         cancelDebounce()
-        suggestions = .idle
+        dismissSuggestions()
         translateNow()
     }
 
@@ -279,7 +291,7 @@ public final class TranslatorModel {
         sourceLanguage = pair.source
         targetLanguage = pair.target
         adjustingLanguages = false
-        suggestions = .idle
+        dismissSuggestions()
         if !sourceText.isEmpty { translateNow() }
     }
 
@@ -308,7 +320,7 @@ public final class TranslatorModel {
         sourceText = text
         adjustingLanguages = false
         cancelDebounce()
-        suggestions = .idle
+        dismissSuggestions()
         if let knownTranslation {
             detected = sourceLanguage == nil
                 ? LanguageDetector(candidates: settings.enabledLanguages.map(\.code)).detect(text) : nil
@@ -413,7 +425,8 @@ public final class TranslatorModel {
         let phrase = selection.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !phrase.isEmpty, let src = effectiveSource else { return }
         if pane == .translation, translation.isEmpty { return }
-        suggestionTask?.cancel()
+        dismissSuggestions()
+        let session = suggestionGeneration
         suggestions = .loading(pane: pane, selection: phrase)
         let source = settings.language(src), target = settings.language(targetLanguage)
         let request: LLMRequest
@@ -436,17 +449,91 @@ public final class TranslatorModel {
             do {
                 let raw = try await provider.complete(request)
                 let items = try PhraseSuggestion.parse(raw, excluding: pane == .translation ? phrase : nil)
-                guard !Task.isCancelled, let self, self.suggestions == .loading(pane: pane, selection: phrase) else { return }
+                guard !Task.isCancelled, let self, self.suggestionGeneration == session else { return }
+                self.originalSuggestions = items
+                self.shownSuggestions = Dictionary(
+                    (items.map(\.text) + [phrase]).map { (PhraseSuggestion.wordingKey($0), $0) },
+                    uniquingKeysWith: { first, _ in first })
                 self.suggestions = .loaded(pane: pane, selection: phrase, items: items)
             } catch {
-                guard !(error is CancellationError), let self, self.suggestions == .loading(pane: pane, selection: phrase) else { return }
+                guard !Task.isCancelled, !(error is CancellationError), let self, self.suggestionGeneration == session else { return }
                 self.suggestions = .failed(pane: pane, selection: phrase, message: error.localizedDescription)
             }
         }
     }
 
+    public func refreshSuggestion(at index: Int) {
+        guard case .loaded(let pane, let selection, let items) = suggestions, pane == .translation,
+              items.indices.contains(index), originalSuggestions.indices.contains(index),
+              suggestionRefreshStates[index] != .loading, let src = effectiveSource else { return }
+        let request: LLMRequest
+        do {
+            request = LLMRequest(
+                model: settings.suggestionsModel,
+                instructions: Prompts.similarAlternative(source: settings.language(src),
+                                                         target: settings.language(targetLanguage), tone: tone),
+                input: try Prompts.similarAlternativeInput(sourceText: sourceText, translation: translation,
+                    selection: selection, original: originalSuggestions[index], excluded: shownSuggestions.values.sorted()),
+                format: StructuredFormat(name: "similar_alternative", schema: Prompts.suggestionSchema))
+        } catch {
+            suggestionRefreshStates[index] = .failed(message: error.localizedDescription)
+            return
+        }
+        let session = suggestionGeneration
+        let provider = self.provider
+        suggestionRefreshStates[index] = .loading
+        suggestionRefreshTasks[index] = Task { [weak self] in
+            let result: Result<[PhraseSuggestion], Error>
+            do {
+                result = .success(try PhraseSuggestion.parse(await provider.complete(request)))
+            } catch {
+                result = .failure(error)
+            }
+            guard !Task.isCancelled else { return }
+            self?.finishSuggestionRefresh(result, at: index, session: session)
+        }
+    }
+
+    private func finishSuggestionRefresh(_ result: Result<[PhraseSuggestion], Error>, at index: Int, session: Int) {
+        guard suggestionGeneration == session, case .loaded(let pane, let selection, var items) = suggestions,
+              items.indices.contains(index) else { return }
+        suggestionRefreshTasks[index] = nil
+        suggestionRefreshStates[index] = nil
+        do {
+            let alternatives = try result.get()
+            guard !alternatives.isEmpty else {
+                suggestionRefreshStates[index] = .failed(message: "No different alternative found. Try again.")
+                return
+            }
+            guard alternatives.count == 1 else { throw LLMError.invalidResponse("Expected one alternative.") }
+            let replacement = alternatives[0]
+            guard !replacement.note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  !replacement.back.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw LLMError.invalidResponse("Expected a usage note and back-translation.")
+            }
+            // Recheck at completion: another row may have produced the same wording in the meantime.
+            let wording = PhraseSuggestion.wordingKey(replacement.text)
+            guard !wording.isEmpty, shownSuggestions[wording] == nil else {
+                suggestionRefreshStates[index] = .failed(message: "No different alternative found. Try again.")
+                return
+            }
+            shownSuggestions[wording] = replacement.text
+            items[index] = replacement
+            suggestions = .loaded(pane: pane, selection: selection, items: items)
+        } catch {
+            suggestionRefreshStates[index] = .failed(message: error.localizedDescription)
+        }
+    }
+
     public func dismissSuggestions() {
+        suggestionGeneration += 1
         suggestionTask?.cancel()
+        suggestionTask = nil
+        for task in suggestionRefreshTasks.values { task.cancel() }
+        suggestionRefreshTasks.removeAll()
+        suggestionRefreshStates.removeAll()
+        originalSuggestions.removeAll()
+        shownSuggestions.removeAll()
         suggestions = .idle
     }
 

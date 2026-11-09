@@ -67,6 +67,12 @@ Agreed in the grilling session on project start; this file is the source of trut
   Clicking replaces the selection and the rest of the sentence is re-smoothed to stay grammatical.
   Replacement plus adjustment is one undoable edit. If adjustment fails, keep the replacement and
   offer Retry adjustment and Undo; retry must not translate the source again.
+- Each translation alternative has a small **Another like this** button, visible on hover or keyboard
+  focus. It requests one new option anchored to that row's original meaning and style, with a new note
+  and back-translation. Refreshing never applies a phrase or changes the other rows. Previously shown
+  wording is excluded for the current popover; punctuation-only changes do not count as new wording.
+  A pending row cannot start another refresh. Failure preserves its old option and allows retry.
+  Closing the popover or changing the translation context cancels pending refreshes.
 - Select text in the **source** pane → ⌘E → idiomatic target-language equivalents with explanations
   (does not modify the translation).
 - Notes are in the source language.
